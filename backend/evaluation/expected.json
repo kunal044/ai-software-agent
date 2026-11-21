@@ -1,0 +1,38 @@
+{
+  "version": "source-diagnostics-v1",
+  "files": [
+    "unused.py",
+    "unused.js",
+    "Broken.java",
+    "broken.cpp",
+    "unsupported.py"
+  ],
+  "expected": [
+    {
+      "path": "unused.py",
+      "line": 1,
+      "rule": "F401"
+    },
+    {
+      "path": "unused.js",
+      "line": 1,
+      "rule": "no-unused-vars"
+    },
+    {
+      "path": "Broken.java",
+      "line": 1,
+      "rule": "compiler.err.illegal.start.of.expr"
+    },
+    {
+      "path": "broken.cpp",
+      "line": 1,
+      "rule": "G++"
+    }
+  ],
+  "unsupported": [
+    {
+      "path": "unsupported.py",
+      "description": "Off-by-one behavior relative to the intended inclusive count. This requires behavioral specifications or runtime tests and is excluded from scoring."
+    }
+  ]
+}

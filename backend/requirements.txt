@@ -1,0 +1,10 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+openai>=1.73,<4
+groq>=0.31,<2
+python-dotenv>=1,<2
+python-multipart>=0.0.20,<1
+ruff>=0.11,<1
+pytest>=8,<10
+httpx>=0.28,<1
+
