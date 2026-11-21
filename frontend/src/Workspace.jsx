@@ -46,6 +46,7 @@ export function Workspace() {
     action={data && <div className="actions">
       <Link className="button" to={workspacePath(repoId, 'files')}><FileCode size={17} /> File explorer</Link>
       <a className="button" href={base + '/api/repos/' + repoId + '/report'}><ArrowDownToLine size={17} /> Download report</a>
+      <a className="button" href={base + '/api/repos/' + repoId + '/report.pdf'}><ArrowDownToLine size={17} /> Download PDF</a>
       <a className="button" href={base + '/api/repos/' + repoId + '/export'}><ArrowDownToLine size={17} /> Export ZIP</a>
     </div>}>
     <Feedback error={repo.error || action.error} busy={repo.loading || action.busy}

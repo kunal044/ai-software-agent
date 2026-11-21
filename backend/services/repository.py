@@ -75,7 +75,7 @@ def parts_for(name):
             part in {"", ".", ".."}
             or part.endswith((" ", "."))
             or PureWindowsPath(part).is_reserved()
-            or re.search(r'[\\:*?"<>|\x00-\x1f]', part)
+            or re.search(r'[\\:*?"<>|\x00-\x1f\u202a-\u202e\u2066-\u2069]', part)
         ):
             raise HTTPException(422, "Project contains an unsafe path.")
     return parts
@@ -147,7 +147,10 @@ def source(root, name):
     if not language or path.stat().st_size > MAX_SOURCE:
         raise HTTPException(415, "File type or size is unsupported for preview.")
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_SOURCE + 1)
+        if len(raw) > MAX_SOURCE:
+            raise HTTPException(415, "File size is unsupported for preview.")
         content = raw.decode("utf-8")
         if "\0" in content:
             raise ValueError

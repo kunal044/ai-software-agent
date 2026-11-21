@@ -49,13 +49,13 @@ def latest(conn, kind, repo):
     return json.loads(row[0]) if row else None
 
 
-def records(conn, kind, repo=None, exclude=()):
+def records(conn, kind, repo=None, exclude=(), *, limit=-1):
     projection = "payload"
     if exclude:
         placeholders = ", ".join("?" for _ in exclude)
         projection = f"json_remove(payload, {placeholders})"
     rows = conn.execute(
-        f"SELECT {projection} FROM records WHERE kind=? AND (? IS NULL OR repo=?) ORDER BY rowid DESC",
-        (*("$." + key for key in exclude), kind, repo, repo),
+        f"SELECT {projection} FROM records WHERE kind=? AND (? IS NULL OR repo=?) ORDER BY rowid DESC LIMIT ?",
+        (*("$." + key for key in exclude), kind, repo, repo, limit),
     )
     return [json.loads(row[0]) for row in rows]

@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app
-from services import patches, repository, store
+from services import patch_evaluation, patches, repository, store
 
 REAL_GROQ = patches.groq.Groq
 
@@ -73,7 +73,14 @@ def test_import_failure_cleans_workspace(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "path", ["../outside.py", "C:/unsafe.py", "src/CON.txt", "src/..\\unsafe.py"]
+    "path",
+    [
+        "../outside.py",
+        "C:/unsafe.py",
+        "src/CON.txt",
+        "src/..\\unsafe.py",
+        "src/hidden\u202e.py",
+    ],
 )
 def test_zip_traversal(client, path):
     assert upload(client, {path: "bad"}).status_code == 422
@@ -1224,20 +1231,24 @@ def test_bundled_benchmark_persists_real_results(client):
     assert response.status_code == 201, response.text
     result = response.json()
     assert result == client.get("/api/dashboard/benchmark/latest").json()
-    assert result["dataset"] == "source-diagnostics-v1"
-    assert result["known_unsupported"] and result["duration_ms"] >= 0
-    if result["missing"]:
-        assert result["metrics"] is None
-    else:
-        from services import evaluation
-
-        def labels(items):
-            return {(item["path"], item["line"], item["rule"]) for item in items}
-
-        assert result["metrics"] == evaluation.score(
-            labels(result["expected"]), labels(result["detected"])
-        )
-        assert len(result["expected"]) == 4
+    assert result["dataset"] == "source-diagnostics-v2"
+    assert result["mode"] == "static analysis"
+    assert len(result["cases"]) == 100
+    assert len(result["by_language"]) == 5
+    assert result["metrics"]["cases"] == 100
+    assert (
+        result["metrics"]["evaluated"] + len(result["missing"])
+        == result["metrics"]["supported"]
+    )
+    assert result["metrics"]["supported"] + len(result["known_unsupported"]) == 100
+    assert (
+        result["metrics"]["true_positive"] + result["metrics"]["false_negative"]
+        == (result["metrics"]["positive_labels"])
+    )
+    assert (
+        result["metrics"]["true_positive"] + result["metrics"]["false_positive"]
+        == (result["metrics"]["detected_findings"])
+    )
 
 
 def test_github_auth_failure_is_sanitized(client, monkeypatch):
@@ -1478,3 +1489,130 @@ def test_architecture_review_and_report(client, monkeypatch):
     )
     assert "Architecture snapshot:" in report.text and "worker.py" in report.text
     assert "def run():" not in report.text
+
+
+def test_json_input_limit(client):
+    response = client.post(
+        "/api/dashboard/benchmark",
+        content=b" " * (2 * 1024**2 + 1),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert client.get("/api/health").status_code == 200
+
+
+def test_streamed_input_limit(client):
+    def body():
+        for _ in range(3):
+            yield b" " * 1024**2
+
+    response = client.post(
+        "/api/dashboard/benchmark",
+        content=body(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_proposal", "accepted"),
+    [(patch_evaluation.MOCK_RESPONSE, "valid", 1), ({}, "invalid", 0)],
+)
+def test_isolated_patch_evaluation(client, response, expected_proposal, accepted):
+    result = patch_evaluation.run("mocked", response, "Test fixture")
+    assert result["case"]["proposal"] == expected_proposal
+    assert result["metrics"]["accepted"] == accepted
+    assert result["metrics"]["runtime_rate"] is None
+    assert client.get("/api/repos").json() == []
+    with store.database() as conn:
+        store.save(conn, "patch_benchmark_run", result)
+    assert client.get("/api/dashboard/evaluations").json()["patches"] == [result]
+
+
+def test_pdf_report_omits_source(client, monkeypatch):
+    marker = "source-content-only"
+    created = upload(client, {"sample.py": f"value = '{marker}'\n"})
+    assert created.status_code == 201
+    base = f"/api/repos/{created.json()['id']}"
+    assert client.post(base + "/analyze").status_code == 200
+
+    from services import pdf_report
+
+    original = pdf_report.render
+
+    def render(repo, scan, patches, detection, runs):
+        assert scan["files_analyzed"] == 1
+        result = original(repo, scan, patches, detection, runs)
+        assert result.startswith(b"%PDF-")
+        return result
+
+    monkeypatch.setattr(pdf_report, "render", render)
+    response = client.get(base + "/report.pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["cache-control"] == "no-store"
+    assert marker.encode() not in response.content
+    assert (
+        client.get(base + "/report").headers["content-type"].startswith("text/markdown")
+    )
+
+
+def test_detection_benchmark_rejects_concurrent_runs(client):
+    from services.api import benchmark_lock
+
+    with benchmark_lock:
+        response = client.post("/api/dashboard/benchmark/run")
+        assert response.status_code == 409
+        assert client.get("/api/health").status_code == 200
+
+
+def test_groq_timeout_keeps_source_and_proposals_unchanged(
+    client, scanned, groq_settings, monkeypatch
+):
+    import httpx
+
+    def handler(request):
+        raise httpx.ReadTimeout("private provider timeout", request=request)
+
+    mock_groq(monkeypatch, handler)
+    _, prefix, finding_id = scanned
+    params = {"path": "src/main.py"}
+    original = client.get(prefix + "/file", params=params).json()["content"]
+    response = client.post(f"/api/findings/{finding_id}/fix")
+    assert response.status_code == 504
+    assert response.json()["detail"] == "Groq request timed out."
+    assert client.get(prefix + "/patches").json() == []
+    assert client.get(prefix + "/file", params=params).json()["content"] == original
+
+
+def test_database_write_failure_restores_source(client, scanned, model, monkeypatch):
+    import sqlite3
+
+    repo_id, prefix, finding_id = scanned
+    proposed = client.post(f"/api/findings/{finding_id}/fix")
+    assert proposed.status_code == 201
+    patch_id = proposed.json()["id"]
+    path = proposed.json()["path"]
+    original = client.get(prefix + "/file", params={"path": path}).json()["content"]
+    save = store.save
+
+    def fail_final_save(conn, kind, record):
+        if kind == "patch" and record["status"] == "accepted":
+            raise sqlite3.OperationalError("fixture database write failure")
+        return save(conn, kind, record)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(store, "save", fail_final_save)
+        failing_client = TestClient(
+            app, base_url="http://localhost", raise_server_exceptions=False
+        )
+        response = failing_client.post(f"/api/patches/{patch_id}/accept")
+    assert response.status_code == 500
+    assert "fixture database write failure" not in response.text
+    assert (
+        client.get(prefix + "/file", params={"path": path}).json()["content"]
+        == original
+    )
+    assert client.get(f"/api/patches/{patch_id}").json()["status"] == "proposed"
+    assert not (store.WORKSPACE / repo_id / ".pending-patch").exists()
+    assert client.post(f"/api/patches/{patch_id}/accept").status_code == 200

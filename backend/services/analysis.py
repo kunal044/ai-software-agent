@@ -87,9 +87,10 @@ def scan(root, repo_id):
         if language is not languages.PYTHON or issues:
             continue
         try:
-            result = subprocess.run(
+            result = validation.run(
                 [
                     sys.executable,
+                    "-I",
                     "-m",
                     "ruff",
                     "check",
@@ -102,11 +103,8 @@ def scan(root, repo_id):
                     f"--stdin-filename={name}",
                     "-",
                 ],
-                input=code.encode(),
-                capture_output=True,
+                code,
                 timeout=15,
-                cwd=root.parent,
-                check=False,
             )
             if result.returncode not in {0, 1}:
                 raise ValueError

@@ -39,21 +39,25 @@ class LocalRequestGuard:
                 {"detail": "Request origin is not allowed."}, status_code=403
             )(scope, receive, send)
             return
-        if scope["path"].rstrip("/") != "/api/repos/upload":
-            await self.app(scope, receive, send)
+        upload = scope["path"].rstrip("/") == "/api/repos/upload"
+        limit = MAX_BYTES + 4 * 1024**2 if upload else 2 * 1024**2
+        declared = headers.get(b"content-length")
+        if declared is None and upload:
+            await JSONResponse(
+                {"detail": "Upload requires a bounded Content-Length."}, status_code=411
+            )(scope, receive, send)
             return
-        limit = MAX_BYTES + 4 * 1024**2
-        try:
-            length = int(headers.get(b"content-length", b"-1"))
-        except ValueError:
-            length = -1
-        if not 0 <= length <= limit:
-            response = JSONResponse(
-                {"detail": "Upload requires a bounded Content-Length."},
-                status_code=413 if length > limit else 411,
-            )
-            await response(scope, receive, send)
-            return
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= limit:
+                await JSONResponse(
+                    {"detail": "Invalid or excessive request size."},
+                    status_code=413 if length > limit else 400,
+                )(scope, receive, send)
+                return
         total = 0
 
         async def bounded_receive():
@@ -61,7 +65,7 @@ class LocalRequestGuard:
             message = await receive()
             total += len(message.get("body", b""))
             if total > limit:
-                raise HTTPException(413, "Upload exceeds the request size limit.")
+                raise HTTPException(413, "Body exceeds the request size limit.")
             return message
 
         await self.app(scope, bounded_receive, send)
