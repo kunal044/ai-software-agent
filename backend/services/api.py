@@ -31,6 +31,7 @@ from services import evaluation, github, intelligence
 
 router = APIRouter(prefix="/api")
 mutations = threading.Lock()
+benchmark_lock = threading.Lock()
 
 
 class ImportRequest(BaseModel):
@@ -544,12 +545,16 @@ def latest_benchmark():
 
 @router.post("/dashboard/benchmark/run", status_code=201)
 def run_benchmark():
-    with mutations:
+    if not benchmark_lock.acquire(blocking=False):
+        raise HTTPException(409, "A detection benchmark is already running.")
+    try:
         result = evaluation.evaluate()
         result["repo_id"] = "bundled"
         with store.database() as conn:
             store.save(conn, "benchmark_run", result)
         return result
+    finally:
+        benchmark_lock.release()
 
 
 @router.get("/patches/{patch_id}/verification")
@@ -944,6 +949,51 @@ def code_review(repo_id: str, payload: intelligence.ReviewInput):
             static_scan_id=scan["id"] if scan else None,
             ai_suggestions=suggestions,
         )
+
+
+@router.get("/dashboard/evaluations")
+def evaluation_history():
+    with store.database() as conn:
+        return {
+            "detection": store.records(
+                conn,
+                "benchmark_run",
+                "bundled",
+                exclude=(
+                    "cases",
+                    "detected",
+                    "expected",
+                    "known_unsupported",
+                    "by_language",
+                    "by_category",
+                    "missing",
+                ),
+                limit=25,
+            ),
+            "patches": store.records(conn, "patch_benchmark_run", "bundled", limit=25),
+        }
+
+
+@router.get("/repos/{repo_id}/report.pdf")
+def repository_report_pdf(repo_id: str):
+    from services import pdf_report
+
+    with store.database() as conn:
+        repo = required(conn, "repository", repo_id)
+        scan = store.latest(conn, "analysis", repo_id)
+        review = store.records(
+            conn, "patch", repo_id, exclude=("original", "proposed", "diff", "changes")
+        )
+        benchmark = store.latest(conn, "benchmark_run", "bundled")
+        runs = store.records(conn, "patch_benchmark_run", "bundled")
+    return Response(
+        pdf_report.render(repo, scan, review, benchmark, runs),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="repository-report.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/repos/{repo_id}/report")

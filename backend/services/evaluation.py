@@ -1,8 +1,11 @@
 """Counters and verification for stored scans and labeled benchmarks."""
 
 from collections import Counter
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import perf_counter
 from uuid import uuid4
 
 from services import analysis, languages
@@ -23,27 +26,96 @@ def score(expected, detected):
 
 
 def evaluate():
-    manifest = json.loads((DATASET / "expected.json").read_text(encoding="utf-8"))
+    manifest = json.loads((DATASET / "cases.json").read_text(encoding="utf-8"))
+    cases = manifest["cases"]
+    by_path = {case["path"]: case for case in cases}
+    if len(by_path) != len(cases) or len({case["id"] for case in cases}) != len(cases):
+        raise ValueError("Benchmark case paths and IDs must be unique.")
+    measured = set()
+    observed = []
+    started = perf_counter()
+    with TemporaryDirectory(prefix="source-benchmark-") as workspace:
+        for language in sorted({case["language"] for case in cases}):
+            root = Path(workspace) / language
+            root.mkdir()
+            for case in cases:
+                if case["language"] == language:
+                    (root / case["path"]).write_text(
+                        case["source"] + "\n", encoding="utf-8", newline="\n"
+                    )
+            scan = analysis.scan(root, "bundled-benchmark")
+            measured.update(scan["analyzed_paths"])
+            observed.extend(scan["findings"])
 
     def key(item):
         return item["path"], item["line"], item["rule"]
 
-    scan = analysis.scan(DATASET / "fixtures", "bundled-benchmark")
-    expected = {key(item) for item in manifest["expected"]}
-    detected = {key(item) for item in scan["findings"]}
-    missing = sorted(set(manifest["files"]) - set(scan["analyzed_paths"]))
+    def summarize(subset):
+        covered = [
+            case for case in subset if case["supported"] and case["path"] in measured
+        ]
+        paths = {case["path"] for case in covered}
+        expected = {
+            key({"path": case["path"], **case["expected"]})
+            for case in covered
+            if case["expected"]
+        }
+        findings = [key(item) for item in observed if item["path"] in paths]
+        result = score(expected, set(findings))
+        duplicates = len(findings) - len(set(findings))
+        result["false_positive"] += duplicates
+        if findings:
+            result["precision"] = result["true_positive"] / len(findings)
+        if expected or findings:
+            result["f1"] = 2 * result["true_positive"] / (len(expected) + len(findings))
+        return dict(
+            **(result if covered else dict.fromkeys(result)),
+            cases=len(subset),
+            evaluated=len(covered),
+            supported=sum(case["supported"] for case in subset),
+            unsupported=sum(not case["supported"] for case in subset),
+            positive_labels=len(expected),
+            detected_findings=len(findings),
+            true_negative=sum(
+                not case["expected"]
+                and case["path"] not in {item[0] for item in findings}
+                for case in covered
+            ),
+        )
+
+    def break_down(field):
+        return {
+            label: summarize([case for case in cases if case[field] == label])
+            for label in sorted({case[field] for case in cases})
+        }
+
+    public_cases = [
+        {key: value for key, value in case.items() if key != "source"} for case in cases
+    ]
     return dict(
         id=str(uuid4()),
         dataset=manifest["version"],
-        created_at=scan["created_at"],
-        duration_ms=scan["duration_ms"],
-        metrics=None if missing else score(expected, detected),
-        missing=missing,
-        expected=manifest["expected"],
-        known_unsupported=manifest["unsupported"],
+        mode="static analysis",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        duration_ms=round((perf_counter() - started) * 1000, 1),
+        metrics=summarize(cases),
+        by_language=break_down("language"),
+        by_category=break_down("category"),
+        missing=sorted(
+            case["path"]
+            for case in cases
+            if case["supported"] and case["path"] not in measured
+        ),
+        cases=public_cases,
+        expected=[
+            dict(path=case["path"], **case["expected"])
+            for case in public_cases
+            if case["expected"]
+        ],
+        known_unsupported=[case for case in public_cases if not case["supported"]],
         detected=[
             dict(path=path, line=line, rule=rule)
-            for path, line, rule in sorted(detected)
+            for path, line, rule in sorted({key(item) for item in observed})
         ],
     )
 
@@ -167,3 +239,7 @@ def summarize_findings(findings):
             finding.get("language") or (language.name if language else "Other")
         ] += 1
     return dict(coverage)
+
+
+if __name__ == "__main__":
+    print(json.dumps(evaluate(), indent=2))

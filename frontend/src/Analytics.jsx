@@ -65,7 +65,17 @@ function ScanHistory({ scans }) {
   </section>
 }
 
-function Benchmark() {
+function BenchmarkBreakdown({ title, rows }) {
+  return <details><summary>{title}</summary>
+    <ul>{Object.entries(rows).map(([label, metrics]) => <li key={label}>
+      <strong>{label}</strong> ({metrics.evaluated}/{metrics.cases} cases evaluated)
+      {' · '}{benchmarkFields.map(([key, name]) => name + ' ' + format(key, metrics[key])).join(' · ')}
+      {' · '}{metrics.positive_labels} positive labels, {metrics.detected_findings} detections
+    </li>)}</ul>
+  </details>
+}
+
+function Benchmark({ onRun }) {
   const saved = useData('/dashboard/benchmark/latest')
   const [started, setStarted] = useState(null)
   const action = useAction()
@@ -74,6 +84,7 @@ function Benchmark() {
     <button className="button primary" disabled={action.busy} onClick={() => action.run(async () => {
       const { data } = await api.post('/dashboard/benchmark/run')
       setStarted(data)
+      onRun()
     })}><ClipboardCheck size={16} /> Run benchmark</button></div>
     <div className="panel-body evaluation-detail">
       <Feedback busy={saved.loading || action.busy} error={saved.error || action.error} message="Checking benchmark source files…" />
@@ -83,6 +94,10 @@ function Benchmark() {
         {result.metrics ? <CardGrid data={result.metrics} fields={benchmarkFields} />
           : <p className="muted">Scores unavailable. These fixtures were not analyzed: {result.missing.join(', ')}.</p>}
         <p className="muted">Precision uses detected findings. Recall uses labeled findings. F1 uses both sets. A zero denominator displays a dash.</p>
+        {result.mode && <p>{result.mode} · {result.metrics.evaluated} of {result.metrics.cases} cases evaluated · {result.metrics.supported} supported · {result.metrics.unsupported} unsupported</p>}
+        {result.mode && <p className="muted">{result.metrics.positive_labels} expected positives · {result.metrics.detected_findings} detections · {result.metrics.true_negative} clean files without findings{result.missing.length > 0 && ' · ' + result.missing.length + ' supported files unavailable'}</p>}
+        {result.by_language && <BenchmarkBreakdown title="Results by language" rows={result.by_language} />}
+        {result.by_category && <BenchmarkBreakdown title="Results by case category" rows={result.by_category} />}
         <details><summary>Scored labels and detected findings</summary>
           {[['Expected', result.expected], ['Detected', result.detected]].map(([label, items]) => <div key={label}>
             <h3>{label}</h3><ul>{items.map(item =>
@@ -95,7 +110,38 @@ function Benchmark() {
   </section>
 }
 
+function EvaluationHistory({ revision }) {
+  const history = useData('/dashboard/evaluations', revision)
+  return <section className="panel"><div className="panel-title"><h2>Evaluation history</h2></div>
+    <div className="panel-body evaluation-detail">
+      <Feedback busy={history.loading} error={history.error} />
+      {!!history.data?.detection.length && <details><summary>Static detection runs</summary><ul>
+        {history.data.detection.map(run => <li key={run.id}>
+          {run.dataset} · {new Date(run.created_at).toLocaleString()} · F1 {format('f1', run.metrics?.f1)}
+          {' · '}{run.metrics?.evaluated ?? 'Unknown'} cases evaluated
+        </li>)}
+      </ul></details>}
+      {history.data && ['mocked', 'offline replay', 'live Groq'].map(mode => {
+        const runs = history.data.patches.filter(run => run.mode === mode)
+        return <details key={mode} open={mode === 'live Groq'}><summary className="capitalize">{mode} patch evaluations</summary>
+          {runs.length ? <ul>{runs.map(run => <li key={run.id}>
+            {run.dataset} · {new Date(run.created_at).toLocaleString()}{run.model && ' · ' + run.model}
+            <ul>
+              <li>Generation {format('precision', run.metrics.generation_rate)} ({run.metrics.attempted} attempted)</li>
+              <li>Syntax {format('precision', run.metrics.syntax_rate)} ({run.metrics.syntax_attempted} checked)</li>
+              <li>Static verification {format('precision', run.metrics.static_rate)} ({run.metrics.static_checked} compared)</li>
+              <li>New finding rate {format('precision', run.metrics.introduced_rate)} ({run.metrics.static_checked} compared)</li>
+              <li>Runtime tests {run.case.runtime}</li>
+            </ul>
+          </li>)}</ul> : <p className="muted">No {mode} results recorded.</p>}
+        </details>
+      })}
+    </div>
+  </section>
+}
+
 export default function Analytics() {
+  const [revision, setRevision] = useState(0)
   const report = useData('/dashboard')
   const data = report.data
   return <Page title="Analytics" subtitle="Inspect recorded scan findings, patch outcomes, and detection benchmark scores.">
@@ -119,7 +165,8 @@ export default function Analytics() {
           </Link>) : <div className="panel-body muted">Approve a patch to record a comparison.</div>}
       </section>
     </>}
-    <Benchmark />
+    <Benchmark onRun={() => setRevision(value => value + 1)} />
+    <EvaluationHistory revision={revision} />
   </Page>
 }
 

@@ -1,6 +1,6 @@
 # AI Software Engineer Agent
 
-Code Review is a local workspace for inspecting imported source, running bounded Python static analysis, and reviewing AI-proposed remediations before applying them. It addresses the gap between a linter diagnostic and a change someone can inspect, approve, and measure.
+Code Review is a local workspace for inspecting imported source, running bounded multi-language static analysis, and reviewing AI-proposed remediations before applying them. It addresses the gap between a linter diagnostic and a change someone can inspect, approve, and measure.
 
 ## What you can do
 
@@ -21,7 +21,7 @@ flowchart LR
     UI["React · Vite · Tailwind · Monaco"] -->|Axios| API["FastAPI"]
     API --> Import["Git / ZIP / folder import"]
     Import --> Work["Isolated working copy"]
-    API --> Static["Python AST · Ruff"]
+    API --> Static["Language compilers, Ruff and ESLint"]
     Work --> Static
     API --> Review["Patch review"]
     Review -->|"Bounded source excerpt"| Provider["GroqCloud or OpenAI"]
@@ -36,28 +36,46 @@ Run one FastAPI worker for this single-user MVP. Mutations are serialized in-pro
 
 [Architecture and data flow](docs/architecture.md)
 
-## Run on Windows
+## Workflow details
 
-Requires Python 3.11, Git, and Node.js. The existing Python 3.11.9 virtual environment pointed to a missing interpreter in this workspace. A signed portable replacement was downloaded to D: and configured to reuse the installed virtual environment packages. If it is present, run these from PowerShell:
-
-~~~powershell
-cd D:\AI-Software-Engineer-Agent\backend
-.\.runtime\python.exe -m uvicorn main:app --reload --port 8000
+~~~mermaid
+flowchart TD
+    Import[GitHub, ZIP or folder] --> Bounds[Check path and size limits]
+    Bounds --> Working[Local working copy]
+    Working --> Scan[Language diagnostics]
+    Scan --> SQLite[(SQLite)]
+    Scan --> Finding[Selected finding]
+    Finding --> Model[Bounded prompt and structured AI response]
+    Model --> Diff[Review patch diff]
+    Diff -->|Reject| SQLite
+    Diff -->|Approve| Check[Check path, hash and syntax]
+    Check --> Apply[Journal and apply]
+    Apply --> Compare[Rescan and compare findings]
+    Compare --> SQLite
+    Compare --> Preview[Preview accepted changes against GitHub]
+    Preview --> Confirm{Confirm publication}
+    Confirm -->|Confirm| Branch[Feature branch and pull request]
+    Confirm -->|Cancel| Working
 ~~~
 
-On a clean checkout, use a working Python 3.11 installation to create the environment and install dependencies:
+The API uses FastAPI and SQLite. The React client uses Vite, Tailwind, and Monaco. Server-side reporting uses ReportLab. See the [demo guide](DEMO_GUIDE.md), [security model](SECURITY.md), and [contribution guide](CONTRIBUTING.md).
+
+## Run on Windows
+
+Requires Python 3.11, Git, and Node.js. Install a JDK and G++ for Java and C/C++ diagnostics. Run the backend from PowerShell.
 
 ~~~powershell
-cd D:\AI-Software-Engineer-Agent\backend
+git clone https://github.com/kunal044/ai-software-agent.git
+cd ai-software-agent\backend
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
 ~~~
 
-In a second terminal:
+In a second terminal opened at the cloned repository root:
 
 ~~~powershell
-cd D:\AI-Software-Engineer-Agent\frontend
+cd frontend
 npm ci
 npm run dev
 ~~~
@@ -157,16 +175,16 @@ Open **Patch verification** after approving a patch. The report keeps the origin
 
 **Static verification success rate** is the number of accepted targeted patches with a resolved finding, passing applicable syntax checks, complete static comparison coverage, and zero newly introduced findings, divided by all accepted targeted patches. Incomplete and legacy targeted approvals are included in the denominator and receive no success credit. Untargeted changes are excluded from that rate and appear in verification outcomes. Syntax-valid counts patches with a stored PASSED syntax result. A zero denominator produces an unavailable rate.
 
-**Detection metrics** come from the bundled source-diagnostics-v1 benchmark under backend/evaluation. Select **Run benchmark** in Analytics to run the real analyzers and persist a new result. Exact path, line, and rule tuples define a match. TP is the intersection of the labeled and detected sets. FP and FN are the detected-only and expected-only sets. Precision is TP divided by detected count, recall is TP divided by expected count, and F1 is twice TP divided by the sum of the two counts. An empty denominator is undefined. Scores are withheld if any fixture could not be checked.
+**Detection benchmark.** The bundled suite covers 100 labeled cases across Python, JavaScript, TypeScript, Java, and C++. The recorded Windows run scored 76 supported cases and yielded 56 true positives, 2 unmatched detections, 2 missed labels, and 18 clean negatives. Precision, recall, and F1 were each 96.55%. The other 24 cases represent unsupported coverage. The Analytics page stores static runs and shows separate histories for mocked, offline replay, and live Groq patch evaluation.
 
-The supplied labels cover Ruff F401 (unused Python import), ESLint no-unused-vars (unused JavaScript variable), a Java expression parse error, and a C++ compiler diagnostic for a missing return value. The Python off-by-one fixture represents unsupported behavioral coverage and has no expected static label. These small fixtures demonstrate reproducibility and do not estimate accuracy on arbitrary repositories.
+See [EVALUATION.md](EVALUATION.md) for reproduction, case coverage, rate denominators, and the live Groq confirmation step.
 
 Analytics uses the latest scan from each repository for severity and language distributions. Its trend view shows the most recent 25 stored scans, including before and after scans produced during approval. Historical rows without a timestamp remain undated.
 
 ~~~powershell
 cd D:\AI-Software-Engineer-Agent\backend
-.\.runtime\python.exe -m pytest
-.\.runtime\python.exe -m ruff check main.py services tests
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m ruff check main.py services tests
 cd ..\frontend
 npm run lint
 npm run build
@@ -178,7 +196,7 @@ For the live Chrome workspace regression test, start an isolated backend and fro
 # From the project root, run in the first terminal
 $env:ENGINEER_WORKSPACE = Join-Path (Get-Location) 'backend/workspace/ide-verification/data'
 cd backend
-.\.runtime\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8017
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8017
 ~~~
 
 ~~~powershell
@@ -190,7 +208,7 @@ npm.cmd run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 Run node backend/tests/ide_smoke.mjs from the project root with Chrome installed. Use the matching servers above so the test uses its isolated repository database.
 
-For a mocked browser regression, replace the first terminal's Uvicorn command with .\.runtime\python.exe tests/ide_mock_server.py and set IDE_SMOKE_MOCK=1 before running the Node test. This also checks a first visit without saved conversation state, patch rejection, provider error messages, and the Code Explanation workflow.
+For a mocked browser regression, set the first terminal's PYTHONPATH to its backend directory and replace its Uvicorn command with .\.venv\Scripts\python.exe tests/ide_mock_server.py and set IDE_SMOKE_MOCK=1 before running the Node test. This also checks a first visit without saved conversation state, patch rejection, provider error messages, and the Code Explanation workflow.
 
 ## GitHub and repository intelligence
 
@@ -200,7 +218,7 @@ Set GITHUB_TOKEN to a fine-grained personal access token in backend/.env, restar
 - **Architecture** shows bounded source indexing, candidate entry points, declarations, and direct dependencies. Language coverage varies. The Groq interpretation is labeled separately.
 - **Code Review** accepts up to four current source files or one pending or accepted change set, with a diff selector for multi-file patches. AI suggestions cite the reviewed source version. Static findings come from the latest stored scan.
 - **Pull requests** previews one accepted change set against the GitHub default branch. Publication requires explicit confirmation and creates a dedicated code-review feature branch. If GitHub rejects PR creation after the branch has been created, retry from the workspace after resolving the error. The operation never updates the default branch directly.
-- **Download report** exports Markdown from persisted scan, patch, verification, and benchmark records, with an architecture snapshot when available. The report distinguishes static verification from runtime testing.
+- **Download report** and **Download PDF** export persisted scan, patch, verification, and benchmark records. Markdown includes the architecture snapshot when available. The report distinguishes static verification from runtime testing.
 
 New API routes (under /api):
 
@@ -216,7 +234,8 @@ New API routes (under /api):
 | GET | /repos/{repo_id}/architecture |
 | POST | /repos/{repo_id}/architecture/summary |
 | POST | /repos/{repo_id}/review |
-| GET | /repos/{repo_id}/report |
+| GET | /repos/{repo_id}/report, /repos/{repo_id}/report.pdf |
+| GET | /dashboard/evaluations |
 
 Set IDE_SMOKE_PHASE3=1 on both the mock backend and the mocked Chrome smoke command to cover architecture, code review, authenticated import, and pull request confirmation and status.
 
@@ -244,5 +263,5 @@ These screenshots show a local browser run against a real ZIP import and Ruff sc
 
 ## Future work
 
-A second team member can build a labeled Python benchmark and add browser regression coverage for the import-to-export path. A separate follow-on is opt-in test execution inside a disposable sandbox with network and resource limits. Additional analyzers can reuse the existing finding contract.
+Future work includes larger held-out repositories, more targeted patch cases, and opt-in test execution inside a disposable sandbox with network and resource limits.
 

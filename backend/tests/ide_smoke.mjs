@@ -10,7 +10,7 @@ const mocked = process.env.IDE_SMOKE_MOCK === '1'
 const settings = await (await fetch('http://127.0.0.1:8017/api/settings')).json()
 assert.ok(mocked || (settings.provider === 'groq' && settings.api_key_configured), 'The isolated backend needs Groq credentials.')
 await mkdir(root, { recursive: true })
-execFileSync(resolve('backend/.runtime/python.exe'), ['-c', [
+execFileSync(resolve(process.env.IDE_SMOKE_PYTHON || 'backend/.venv/Scripts/python.exe'), ['-c', [
   'from zipfile import ZipFile',
   'import sys',
   'with ZipFile(sys.argv[1], "w") as fixture:',
@@ -215,6 +215,11 @@ try {
     const report = await (await fetch('http://127.0.0.1:8017/api/repos/' + importedId + '/report')).text()
     assert.match(report, /Accepted: 1/)
     assert.match(report, /Runtime verification: NOT RUN/)
+    const pdf = await fetch('http://127.0.0.1:8017/api/repos/' + importedId + '/report.pdf')
+    assert.equal(pdf.headers.get('content-type'), 'application/pdf')
+    assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 5).toString(), '%PDF-')
+    const evaluation = await fetch('http://127.0.0.1:8017/api/dashboard/evaluations').then(response => response.json())
+    assert.deepEqual(evaluation.patches, [])
     console.log('Chrome passed architecture, review, authenticated import, publication confirmation, PR status, and report.')
   }
 
